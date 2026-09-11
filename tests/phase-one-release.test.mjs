@@ -57,7 +57,7 @@ test("Version 0.35.4 uses the dashboard loading label, favicon metadata, and pre
   assert.match(page, /Loading Dashboard/);
   assert.doesNotMatch(page, /Loading tournament data/);
   assert.match(page, /Version \{APP_VERSION\}/);
-  assert.match(page, /<small>by FalkSport91<\/small>/);
+  assert.match(page, /<small>by Falksport91 LLC<\/small>/);
   assert.match(layout, /favicon\.png/);
   assert.match(layout, /const title = "Tournament referee operations"/);
   assert.match(layout, /const fullTitle = "Law18Referee Management - Tournament referee operations"/);
