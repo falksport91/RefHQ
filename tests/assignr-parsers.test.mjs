@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOfficialsExportCsv, isOperationalGame, normalizePosition, parseAssignrCsv, parseAssignrOfficialsCsv, positionAliasKey, zonedLocalDateTimeToIso } from "../app/supabase-client.ts";
+import { createOfficialsExportCsv, isOperationalGame, normalizePosition, parseAssignrCsv, parseAssignrOfficialsCsv, parseGotSportWorksheet, positionAliasKey, zonedLocalDateTimeToIso } from "../app/supabase-client.ts";
 
 test("parses an actual Assignr games export layout", () => {
   const csv = [
@@ -42,6 +42,34 @@ test("retains an unstaffed game from an Assignr assignments export", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].external_id, "game-db-1");
   assert.equal(rows[0].official_name, "");
+});
+
+test("parses a GotSport Assignor Matches worksheet with ordered crew columns", () => {
+  const sheet = parseGotSportWorksheet("Challenge Cup", [
+    ["Event", "Match Number", "Division", "Date", "Start Time", "Venue", "Home Club", "Home Team", "Visiting Club", "Away Team", "Referee", "Asst Referee 1", "Asst Referee 2", "4th Official"],
+    ["NJYS Challenge Cup Fall 2026", 349, "11U Boys", new Date("2026-09-18T00:00:00.000Z"), "06:00 PM", "Count Basie: Count Basie Field", "Red Bank FC", "Riptides", "Point Pleasant", "Kilauea", "Ref, Riley", "One, Avery", "Two, Alex", "Fourth, Finley"],
+  ]);
+  assert.equal(sheet.event_name, "NJYS Challenge Cup Fall 2026");
+  assert.equal(sheet.rows.length, 4);
+  assert.equal(sheet.rows[0].external_id, "gotsport:njys-challenge-cup-fall-2026:349");
+  assert.equal(sheet.rows[0].date, "2026-09-18");
+  assert.equal(sheet.rows[0].start_time, "18:00:00");
+  assert.equal(sheet.rows[0].venue, "Count Basie");
+  assert.equal(sheet.rows[0].field, "Count Basie Field");
+  assert.equal(sheet.rows[0].age_group, "11U");
+  assert.equal(sheet.rows[0].gender, "Boys");
+  assert.deepEqual(sheet.rows.map((row) => row.position), ["Referee", "AR1", "AR2", "4th Official"]);
+  assert.deepEqual(sheet.rows.map((row) => row.official_name), ["Riley Ref", "Avery One", "Alex Two", "Finley Fourth"]);
+});
+
+test("retains a GotSport game with blank assignment columns", () => {
+  const sheet = parseGotSportWorksheet("Presidents Cup", [
+    ["Event", "Match Number", "Division", "Date", "Start Time", "Venue", "Home Team", "Away Team", "Referee", "Asst Referee 1", "Asst Referee 2", "4th Official"],
+    ["NJYS Presidents Cup", 114, "11U Girls", "09/18/2026", "7:45 PM", "Sid Fay: Field 1", "Home", "Away", "", "", "", ""],
+  ]);
+  assert.equal(sheet.rows.length, 1);
+  assert.equal(sheet.rows[0].official_name, "");
+  assert.equal(sheet.rows[0].position, "");
 });
 
 test("preserves Assignr assignment role categories", () => {

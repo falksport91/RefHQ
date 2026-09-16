@@ -77,9 +77,16 @@ const securityHeaders: Record<string, string> = {
   "X-Frame-Options": "DENY",
 };
 
-function secureResponse(response: Response) {
+function secureResponse(response: Response, request?: Request) {
   const secured = new Response(response.body, response);
   Object.entries(securityHeaders).forEach(([name, value]) => secured.headers.set(name, value));
+  const pathname = request ? new URL(request.url).pathname : "";
+  const contentType = secured.headers.get("Content-Type") || "";
+  if (request?.mode === "navigate" || contentType.includes("text/html") || pathname === "/sw.js" || pathname === "/version.json") {
+    secured.headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+    secured.headers.set("Pragma", "no-cache");
+    secured.headers.set("Expires", "0");
+  }
   return secured;
 }
 
@@ -360,7 +367,7 @@ const worker = {
     const url = new URL(request.url);
 
     if (url.pathname.startsWith("/api/owner-documents/")) {
-      return secureResponse(await documentationDownload(request, env));
+      return secureResponse(await documentationDownload(request, env), request);
     }
 
     if (url.pathname === "/_vinext/image") {
@@ -371,14 +378,14 @@ const worker = {
           const result = await env.IMAGES.input(body).transform(width > 0 ? { width } : {}).output({ format, quality });
           return result.response();
         },
-      }, allowedWidths));
+      }, allowedWidths), request);
     }
 
     if (url.pathname === "/api/calendar-feeds" || url.pathname.startsWith("/api/calendar-feeds/")) {
-      return secureResponse(await calendarFeedApi(request, env, ctx));
+      return secureResponse(await calendarFeedApi(request, env, ctx), request);
     }
 
-    return secureResponse(await handler.fetch(request, env, ctx));
+    return secureResponse(await handler.fetch(request, env, ctx), request);
   },
   async scheduled(_controller: unknown, env: Env, ctx: ExecutionContext) {
     try {

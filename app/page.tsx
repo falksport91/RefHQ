@@ -69,6 +69,7 @@ import {
   markEventRatingsSeen,
   markUserNotificationsRead,
   parseAssignrCsv,
+  parseGotSportWorksheet,
   parseAssignrOfficialsCsv,
   saveAssessmentsBatch,
   submitDraftRating,
@@ -123,6 +124,7 @@ import {
   type ExternalCheckInField,
   type ExternalCheckInLookup,
   type ImportRow,
+  type GotSportSheetImport,
   type OfficialRecord,
   type OfficialImportRow,
   type OfficialImportResult,
@@ -142,7 +144,40 @@ import type { ScheduleExportRow, SchedulePdfOptions } from "./schedule-export";
 import { normalizePhoneNumber, phoneCallHref } from "./phone";
 import { TurnstileChallenge, turnstileEnabled } from "./turnstile";
 
-const APP_VERSION = "0.42.0";
+const APP_VERSION = "0.43.0";
+const AUTOMATIC_RECOVERY_KEY = "law18ref-automatic-recovery";
+
+async function reloadFreshApplication(reason: string) {
+  const previous = Number(sessionStorage.getItem(AUTOMATIC_RECOVERY_KEY) || 0);
+  if (Date.now() - previous < 30_000) return false;
+  sessionStorage.setItem(AUTOMATIC_RECOVERY_KEY, String(Date.now()));
+  try {
+    if ("serviceWorker" in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(registrations.map((registration) => registration.unregister()));
+    }
+    if ("caches" in window) {
+      const names = await caches.keys();
+      await Promise.all(names.filter((name) => name.startsWith("law18referee-")).map((name) => caches.delete(name)));
+    }
+  } finally {
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("recovered", `${APP_VERSION}-${reason}-${Date.now()}`);
+    window.location.replace(nextUrl.toString());
+  }
+  return true;
+}
+
+function AutomaticRecovery({ reason }: { reason: string }) {
+  const [retryAvailable, setRetryAvailable] = useState(false);
+  useEffect(() => {
+    void reloadFreshApplication(reason).then((started) => {
+      if (!started) setRetryAvailable(true);
+    });
+  }, [reason]);
+  if (retryAvailable) return <main className="auth-page"><section className="auth-card"><h1>Law18Ref Could Not Connect</h1><p>Check your internet connection and try again.</p><button className="primary wide" onClick={() => { sessionStorage.removeItem(AUTOMATIC_RECOVERY_KEY); void reloadFreshApplication(reason); }}>Try Again</button></section></main>;
+  return <main className="auth-page"><p className="auth-loading">Loading Dashboard</p></main>;
+}
 
 type View = "dashboard" | "board" | "my_assignments" | "checkin" | "schedule" | "officials" | "coaching" | "assessments" | "import" | "event_settings" | "activity" | "appearance" | "account" | "groups" | "documentation";
 const refreshableViews: View[] = ["dashboard", "board", "my_assignments", "checkin", "schedule", "officials", "coaching", "assessments", "import", "event_settings", "activity", "appearance", "account", "groups", "documentation"];
@@ -1668,6 +1703,9 @@ function ImportView({
   const [officialRows, setOfficialRows] = useState<OfficialImportRow[]>([]);
   const [officialResult, setOfficialResult] = useState<OfficialImportResult | null>(null);
   const [fileName, setFileName] = useState("");
+  const [gotSportSheets, setGotSportSheets] = useState<GotSportSheetImport[]>([]);
+  const [gotSportSheetName, setGotSportSheetName] = useState("");
+  const [sourceEventName, setSourceEventName] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const [draggingFile, setDraggingFile] = useState(false);
@@ -1688,6 +1726,39 @@ function ImportView({
     check_in_enabled: true,
   });
   const destinationEvent = events.find((event) => event.id === destinationEventId);
+
+  function applyScheduleRows(parsed: ImportRow[], nextFileName: string, suggestedEventName = "") {
+    setRows(parsed);
+    setOfficialRows([]);
+    setFileName(nextFileName);
+    setSourceEventName(suggestedEventName);
+    const dates = parsed.map((row) => row.date).sort();
+    setDetails(destinationEvent
+      ? {
+          name: destinationEvent.name,
+          venue: destinationEvent.venue_name,
+          startsOn: destinationEvent.starts_on < dates[0] ? destinationEvent.starts_on : dates[0],
+          endsOn: destinationEvent.ends_on > dates[dates.length - 1] ? destinationEvent.ends_on : dates[dates.length - 1],
+        }
+      : {
+          name: suggestedEventName || nextFileName.replace(/\.(csv|xlsx)$/i, "").replace(/[-_]+/g, " "),
+          venue: parsed[0].venue,
+          startsOn: dates[0],
+          endsOn: dates[dates.length - 1],
+        });
+    const gameCount = new Set(parsed.map((row) => row.external_id)).size;
+    const staffedCount = parsed.filter((row) => row.official_name.trim()).length;
+    setMessage(destinationEvent
+      ? `${gameCount} games with ${staffedCount} staffed positions are ready to add to ${destinationEvent.name}.`
+      : `${gameCount} games with ${staffedCount} staffed positions are ready to create a new event.`);
+  }
+
+  function chooseGotSportSheet(sheetName: string) {
+    const sheet = gotSportSheets.find((item) => item.sheet_name === sheetName);
+    if (!sheet) return;
+    setGotSportSheetName(sheetName);
+    applyScheduleRows(sheet.rows, `${fileName.split("#")[0]}#${sheet.sheet_name}`, sheet.event_name);
+  }
 
   useEffect(() => {
     const aliases = aliasScope === "event"
@@ -1731,7 +1802,7 @@ function ImportView({
     } else if (rows.length) {
       const dates = rows.map((row) => row.date).sort();
       setDetails({
-        name: fileName.replace(/\.csv$/i, "").replace(/[-_]+/g, " "),
+        name: sourceEventName || fileName.replace(/\.(csv|xlsx)(#.*)?$/i, "").replace(/[-_]+/g, " "),
         venue: rows[0].venue,
         startsOn: dates[0],
         endsOn: dates[dates.length - 1],
@@ -1742,45 +1813,54 @@ function ImportView({
 
   async function readFile(file?: File) {
     if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".csv") && file.type !== "text/csv") {
-      setMessage("Please drop an Assignr CSV file.");
+    const isCsv = file.name.toLowerCase().endsWith(".csv") || file.type === "text/csv";
+    const isWorkbook = file.name.toLowerCase().endsWith(".xlsx");
+    if (!isCsv && !(mode === "schedule" && isWorkbook)) {
+      setMessage(mode === "schedule" ? "Please choose an Assignr CSV or GotSport XLSX file." : "Please choose an Assignr users CSV file.");
       return;
     }
     try {
+      if (isWorkbook) {
+        const ExcelJS = (await import("exceljs")).default;
+        const workbook = new ExcelJS.Workbook();
+        await workbook.xlsx.load(await file.arrayBuffer());
+        const parsedSheets = workbook.worksheets.flatMap((worksheet) => {
+          const records: unknown[][] = [];
+          worksheet.eachRow({ includeEmpty: false }, (row) => records.push((row.values as unknown[]).slice(1)));
+          try {
+            return [parseGotSportWorksheet(worksheet.name, records)];
+          } catch (error) {
+            if (error instanceof Error && error.message.includes("is not a recognized GotSport schedule")) return [];
+            throw error;
+          }
+        });
+        if (!parsedSheets.length) throw new Error("No GotSport schedule worksheets were found.");
+        setGotSportSheets(parsedSheets);
+        setGotSportSheetName(parsedSheets[0].sheet_name);
+        setOfficialResult(null);
+        applyScheduleRows(parsedSheets[0].rows, `${file.name}#${parsedSheets[0].sheet_name}`, parsedSheets[0].event_name);
+        return;
+      }
       const contents = await file.text();
       if (mode === "officials") {
         const parsedOfficials = parseAssignrOfficialsCsv(contents);
         setOfficialRows(parsedOfficials);
         setRows([]);
         setFileName(file.name);
+        setGotSportSheets([]);
+        setGotSportSheetName("");
+        setSourceEventName("");
         setOfficialResult(null);
         setMessage(`${parsedOfficials.length} officials are ready for review. No invitation emails will be sent.`);
         return;
       }
       const parsed = parseAssignrCsv(contents);
-      setRows(parsed);
-      setOfficialRows([]);
-      setFileName(file.name);
-      const dates = parsed.map((row) => row.date).sort();
-      setDetails(destinationEvent
-        ? {
-            name: destinationEvent.name,
-            venue: destinationEvent.venue_name,
-            startsOn: destinationEvent.starts_on < dates[0] ? destinationEvent.starts_on : dates[0],
-            endsOn: destinationEvent.ends_on > dates[dates.length - 1] ? destinationEvent.ends_on : dates[dates.length - 1],
-          }
-        : {
-            name: file.name.replace(/\.csv$/i, "").replace(/[-_]+/g, " "),
-            venue: parsed[0].venue,
-            startsOn: dates[0],
-            endsOn: dates[dates.length - 1],
-          });
-      setMessage(destinationEvent
-        ? `${new Set(parsed.map((row) => row.external_id)).size} games with ${parsed.filter((row) => row.official_name.trim()).length} staffed positions are ready to add to ${destinationEvent.name}.`
-        : `${new Set(parsed.map((row) => row.external_id)).size} games with ${parsed.filter((row) => row.official_name.trim()).length} staffed positions are ready to create a new event.`);
+      setGotSportSheets([]);
+      setGotSportSheetName("");
+      applyScheduleRows(parsed, file.name);
     } catch (error) {
       setRows([]);
-      setMessage(error instanceof Error ? error.message : "Unable to read that CSV.");
+      setMessage(error instanceof Error ? error.message : "Unable to read that import file.");
     }
   }
 
@@ -1790,7 +1870,7 @@ function ImportView({
     setDraggingFile(false);
     const files = [...event.dataTransfer.files];
     if (files.length !== 1) {
-      setMessage("Drop one Assignr CSV file at a time.");
+      setMessage("Drop one schedule or officials file at a time.");
       return;
     }
     readFile(files[0]);
@@ -1814,6 +1894,9 @@ function ImportView({
     setOfficialRows([]);
     setOfficialResult(null);
     setFileName("");
+    setGotSportSheets([]);
+    setGotSportSheetName("");
+    setSourceEventName("");
     setMessage("");
     setDraggingFile(false);
     dragDepth.current = 0;
@@ -1879,7 +1962,7 @@ function ImportView({
   const games = new Set(rows.map((row) => row.external_id)).size;
   const referees = new Set(rows.filter((row) => row.official_name.trim()).map((row) => row.official_name.trim().toLowerCase())).size;
   return <section className="page-section">
-    <div className="section-title"><div><p className="eyebrow">EVENTS & ASSIGNR BRIDGE</p><h1>Import center</h1><p>Create an empty event, import the official directory separately, or add one or more schedule days.</p></div>{canCreateEvent && <button className="primary" onClick={() => setCreatingEvent((value) => !value)}>{creatingEvent ? "Cancel" : "Create New Event"}</button>}</div>
+    <div className="section-title"><div><p className="eyebrow">EVENTS & SCHEDULE IMPORTS</p><h1>Import center</h1><p>Create an empty event, import the official directory separately, or add one or more schedule days.</p></div>{canCreateEvent && <button className="primary" onClick={() => setCreatingEvent((value) => !value)}>{creatingEvent ? "Cancel" : "Create New Event"}</button>}</div>
     {creatingEvent && <article className="panel manual-entry-form empty-event-form">
       <div><p className="eyebrow">NEW EVENT</p><h2>Create an event without a schedule</h2><p>Schedules and individual games can be added after the event is created.</p></div>
       <div className="manual-form-grid">
@@ -1900,9 +1983,9 @@ function ImportView({
     </div>
     <div className="import-grid">
       <article className={`panel import-card ${draggingFile ? "dragging" : ""}`} onDragEnter={enterDropZone} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "copy"; }} onDragLeave={leaveDropZone} onDrop={dropFile}>
-        <span className="upload-icon">{draggingFile ? "↓" : "↑"}</span><h2>{draggingFile ? "Drop CSV to upload" : fileName || `Drag an Assignr ${mode === "schedule" ? "games or assignments" : "users"} CSV here`}</h2>
-        <p>{mode === "schedule" ? "Uses either Assignr’s Games export with crew columns or its Assignments export with one official per row." : "Uses Assignr’s Users export. Imported officials remain provisional until they create and verify their account."}</p>
-        <span className="drop-or">or</span><label className="primary file-button">Browse Files<input type="file" accept=".csv,text/csv" onChange={(event) => readFile(event.target.files?.[0])} /></label>
+        <span className="upload-icon">{draggingFile ? "↓" : "↑"}</span><h2>{draggingFile ? "Drop file to upload" : fileName || `Drag an ${mode === "schedule" ? "Assignr CSV or GotSport XLSX" : "Assignr users CSV"} here`}</h2>
+        <p>{mode === "schedule" ? "Uses Assignr Games or Assignments CSV exports, or a GotSport Assignor Matches XLSX workbook. GotSport worksheets are reviewed and imported one competition at a time." : "Uses Assignr’s Users export. Imported officials remain provisional until they create and verify their account."}</p>
+        <span className="drop-or">or</span><label className="primary file-button">Browse Files<input type="file" accept={mode === "schedule" ? ".csv,text/csv,.xlsx,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : ".csv,text/csv"} onChange={(event) => readFile(event.target.files?.[0])} /></label>
         {mode === "schedule" && <a className="text-button sample-link" href="/assignr-schedule.csv" download>Download sample CSV</a>}
       </article>
       <article className="panel import-review">
@@ -1914,11 +1997,13 @@ function ImportView({
           <button className="primary wide" disabled={busy || !officialRows.length} onClick={confirmOfficialImport}>{busy ? "Importing…" : "Import officials"}</button>
         </> : <>
         <h2>{rows.length ? `${games} games · ${referees} assigned officials` : "Select a games export"}</h2>
+        {gotSportSheets.length > 0 && <label>GotSport competition<select value={gotSportSheetName} onChange={(event) => chooseGotSportSheet(event.target.value)}>{gotSportSheets.map((sheet) => <option value={sheet.sheet_name} key={sheet.sheet_name}>{sheet.event_name} · {new Set(sheet.rows.map((row) => row.external_id)).size} games</option>)}</select></label>}
         <label>Import destination<select value={destinationEventId} onChange={(event) => chooseDestination(event.target.value)}><option value="">Create a new event</option>{events.map((event) => <option value={event.id} key={event.id}>Add to {event.name}</option>)}</select></label>
         <label>Event name<input value={details.name} disabled={Boolean(destinationEvent)} onChange={(event) => setDetails({ ...details, name: event.target.value })} /></label>
         <label>Default venue<input value={details.venue} disabled={Boolean(destinationEvent)} onChange={(event) => setDetails({ ...details, venue: event.target.value })} /></label>
         <div className="date-fields"><label>Starts<input type="date" value={details.startsOn} onChange={(event) => setDetails({ ...details, startsOn: event.target.value })} /></label><label>Ends<input type="date" value={details.endsOn} onChange={(event) => setDetails({ ...details, endsOn: event.target.value })} /></label></div>
-        {destinationEvent && <p className="import-note">Games with new Assignr IDs will be added. Matching game IDs and their imported referee crews will be updated. Existing check-ins and other event days stay in place.</p>}
+        {destinationEvent && <p className="import-note">Games with new source IDs will be added. Matching game IDs and their imported referee crews will be updated. Existing check-ins and other event days stay in place. Existing ratings also stay in place.</p>}
+        {gotSportSheets.length > 1 && <p className="import-note">This workbook contains {gotSportSheets.length} competitions. Import the selected worksheet, then select and import each additional competition into its intended event.</p>}
         {rows.some((row) => row.official_email || row.official_phone) && <p className="import-note">Nonblank email addresses and phone numbers in this assignments export will also update matching officials in the Officials directory.</p>}
         {message && <p className="pilot-message">{message}</p>}
         <button className="primary wide" disabled={busy || !rows.length} onClick={confirmImport}>{busy ? "Importing…" : destinationEvent ? "Add schedule to event" : "Create event"}</button>
@@ -4598,7 +4683,7 @@ function Dashboard({ session, onSessionExpired }: { session: Law18Session; onSes
   const showAdministrativeContext = !isPersonalWorkspace && contextViews.includes(view);
 
   if (loading) return <main className="auth-page"><p className="auth-loading">Loading Dashboard</p></main>;
-  if (dashboardLoadError) return <main className="auth-page"><section className="auth-card"><h1>Reload Law18Ref</h1><p>Please reload the page to continue.</p><button className="primary wide" onClick={() => window.location.reload()}>Reload Page</button></section></main>;
+  if (dashboardLoadError) return <AutomaticRecovery reason="dashboard" />;
   return <main>
     <header className="topbar">
       <button className="brand" aria-label="Law18Referee Management dashboard" onClick={() => void openView("dashboard")}><Mark /></button>
@@ -4661,7 +4746,7 @@ function Dashboard({ session, onSessionExpired }: { session: Law18Session; onSes
     </div>
     {event && scheduleOfficialId && (() => { const official = data.officials.find((item) => item.id === scheduleOfficialId) || organizationOfficials.find((item) => item.id === scheduleOfficialId); return official ? <OfficialEventScheduleModal session={session} official={official} event={event} data={data} initialDate={scheduleOfficialDate || undefined} canEdit={isAdministrativeStaff} siteSupervisorView={isSiteCoordinator && !isAdministrativeStaff} onClose={() => { setScheduleOfficialId(null); setScheduleOfficialDate(null); }} onEdit={() => { setScheduleOfficialId(null); setScheduleOfficialDate(null); setOfficialToEditId(official.id); setView("officials"); }} /> : null; })()}
     {event && organization && ratingModalGameId !== null && <AssessmentCenter session={session} event={event} events={events} organizationId={organization.id} data={data} canSubmit={canAssess} canConfigure={false} canApprovePublic={false} initialGameId={ratingModalGameId || undefined} initialAssessmentId={ratingEditAssessmentId || undefined} modal onClose={() => { setRatingModalGameId(null); setRatingEditAssessmentId(null); }} onSaved={applySavedRatings} onEventUpdated={handleEventUpdated} />}
-      <footer><div className="brand footer-brand"><Mark /></div><div className="footer-legal"><span>© 2026 Law18Ref · Version {APP_VERSION}</span><small>by FalkSport91</small></div></footer>
+      <footer><div className="brand footer-brand"><Mark /></div><div className="footer-legal"><span>© 2026 Law18Ref · Version {APP_VERSION}</span><small>by Falksport91 LLC</small></div></footer>
   </main>;
 }
 
@@ -4750,7 +4835,7 @@ export default function Home() {
   }, []);
   if (externalCheckInRequest) return <ExternalCheckInPage eventSlug={externalCheckInRequest.eventSlug} eventDate={externalCheckInRequest.eventDate} onExit={() => { window.history.replaceState({}, "", "/"); window.location.reload(); }} />;
   if (loading) return <main className="auth-page"><p className="auth-loading">Loading Dashboard</p></main>;
-  if (reloadRequired) return <main className="auth-page"><section className="auth-card"><h1>Reload Law18Ref</h1><p>Please reload the page to continue.</p><button className="primary wide" onClick={() => window.location.reload()}>Reload Page</button></section></main>;
+  if (reloadRequired) return <AutomaticRecovery reason="session" />;
   if (!session || recovery) return <AuthPanel onSession={handleSession} recovery={recovery} initialMessage={authMessage} />;
   return <Dashboard session={session} onSessionExpired={handleSessionExpired} />;
 }

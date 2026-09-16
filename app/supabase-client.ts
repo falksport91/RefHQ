@@ -1378,6 +1378,12 @@ export type ImportRow = {
   position: string;
 };
 
+export type GotSportSheetImport = {
+  sheet_name: string;
+  event_name: string;
+  rows: ImportRow[];
+};
+
 export type OfficialImportRow = {
   law18ref_official_id: string | null;
   full_name: string;
@@ -1649,6 +1655,107 @@ export function parseAssignrCsv(text: string): ImportRow[] {
     row.official_phone = normalizePhoneNumber(row.official_phone) || null;
     return row;
   });
+}
+
+function spreadsheetText(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) {
+    return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
+  }
+  if (typeof value === "object") {
+    const candidate = value as { text?: unknown; result?: unknown; richText?: Array<{ text?: unknown }> };
+    if (candidate.text !== undefined) return String(candidate.text).trim();
+    if (candidate.result !== undefined) return spreadsheetText(candidate.result);
+    if (candidate.richText) return candidate.richText.map((part) => String(part.text || "")).join("").trim();
+  }
+  return String(value).trim();
+}
+
+function spreadsheetDate(value: unknown) {
+  if (value instanceof Date) {
+    return `${value.getUTCFullYear()}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const date = new Date(Date.UTC(1899, 11, 30) + Math.round(value * 86_400_000));
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}`;
+  }
+  const text = spreadsheetText(value);
+  const iso = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (iso) return `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`;
+  const us = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (us) {
+    const year = us[3].length === 2 ? `20${us[3]}` : us[3];
+    return `${year}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
+  }
+  throw new Error(`Unrecognized GotSport date "${text}".`);
+}
+
+function gotSportExternalId(eventName: string, matchNumber: string) {
+  const competition = eventName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "event";
+  return `gotsport:${competition}:${matchNumber.trim()}`;
+}
+
+/** Parse one worksheet from GotSport's Assignor Matches workbook. */
+export function parseGotSportWorksheet(sheetName: string, records: unknown[][]): GotSportSheetImport {
+  if (records.length < 2) throw new Error(`${sheetName} does not contain schedule rows.`);
+  const headers = new Map(records[0].map((header, index) => [spreadsheetText(header).toLowerCase(), index]));
+  const required = ["event", "match number", "division", "date", "start time", "venue", "home team", "away team"];
+  const missing = required.filter((header) => !headers.has(header));
+  if (missing.length) throw new Error(`${sheetName} is not a recognized GotSport schedule. Missing: ${missing.join(", ")}.`);
+  const value = (record: unknown[], header: string) => {
+    const index = headers.get(header);
+    return index === undefined ? "" : spreadsheetText(record[index]);
+  };
+  const firstEventName = records.slice(1).map((record) => value(record, "event")).find(Boolean) || sheetName;
+  const rows: ImportRow[] = [];
+  records.slice(1).forEach((record, index) => {
+    const matchNumber = value(record, "match number");
+    const rawDate = record[headers.get("date")!];
+    const startTime = value(record, "start time");
+    if (!matchNumber && !spreadsheetText(rawDate) && !startTime) return;
+    if (!matchNumber || !spreadsheetText(rawDate) || !startTime) {
+      throw new Error(`${sheetName} row ${index + 2} is missing its match number, date, or start time.`);
+    }
+    const eventName = value(record, "event") || firstEventName;
+    const venueField = value(record, "venue");
+    const separator = venueField.indexOf(":");
+    const venue = (separator >= 0 ? venueField.slice(0, separator) : venueField).trim();
+    const field = (separator >= 0 ? venueField.slice(separator + 1) : venueField).trim() || venue;
+    const division = value(record, "division");
+    const ageGroup = division.match(/\b(?:U\d{1,2}|\d{1,2}U)\b/i)?.[0]?.toUpperCase() || "";
+    const gender = division.match(/\b(girls?|boys?|coed|women|men)\b/i)?.[0] || "";
+    const base = {
+      external_id: gotSportExternalId(eventName, matchNumber),
+      date: spreadsheetDate(rawDate),
+      start_time: toIsoTime(startTime),
+      venue,
+      field,
+      home_team: value(record, "home team") || "TBD",
+      away_team: value(record, "away team") || "TBD",
+      division,
+      age_group: ageGroup,
+      gender: gender ? `${gender[0].toUpperCase()}${gender.slice(1).toLowerCase()}` : "",
+      game_type: "",
+      official_email: null,
+      official_phone: null,
+    };
+    const crew = [
+      ["referee", "Referee"],
+      ["asst referee 1", "AR1"],
+      ["asst referee 2", "AR2"],
+      ["4th official", "4th Official"],
+    ] as const;
+    let assigned = false;
+    crew.forEach(([header, position]) => {
+      const official = value(record, header);
+      if (!official) return;
+      assigned = true;
+      rows.push({ ...base, official_name: displayName(official), position });
+    });
+    if (!assigned) rows.push({ ...base, official_name: "", position: "" });
+  });
+  if (!rows.length) throw new Error(`No games were found in ${sheetName}.`);
+  return { sheet_name: sheetName, event_name: firstEventName, rows };
 }
 
 export function parseAssignrOfficialsCsv(text: string): OfficialImportRow[] {
@@ -2184,6 +2291,10 @@ export async function importTournament(
     const changedGameIds = new Set(importedGameIds.filter((gameId) => {
       const existingCrew = existingAssignments.filter((assignment) => assignment.game_id === gameId);
       const incomingCrew = assignmentPayload.filter((assignment) => assignment.game_id === gameId);
+      // A schedule-only export updates the game without implicitly removing a
+      // crew imported earlier from a staffed export. Crew removal remains an
+      // explicit assignment edit rather than a side effect of blank columns.
+      if (!incomingCrew.length) return false;
       return crewSignature(existingCrew) !== crewSignature(incomingCrew);
     }));
     await Promise.all([...changedGameIds].map((gameId) => rest(
