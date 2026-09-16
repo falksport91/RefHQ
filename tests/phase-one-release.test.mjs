@@ -2314,3 +2314,23 @@ test("v0.42.0 supports Google sign-in without losing invitation context", async 
   assert.match(authPanel, /mode !== "recovery"/);
   assert.match(css, /\.google-auth\{/);
 });
+
+test("v0.43.0 adds durable searchable tags to editable games", async () => {
+  const [page, client, css, migration, packageJson] = await Promise.all([
+    read("app/page.tsx"), read("app/supabase-client.ts"), read("app/globals.css"),
+    read("supabase/migrations/20260916174803_game_tags.sql"), read("package.json"),
+  ]);
+
+  assert.match(client, /tags: string\[\]/);
+  assert.match(client, /"operational" \| "tags"/);
+  assert.match(page, /function normalizeGameTags/);
+  assert.match(page, /function GameTags/);
+  assert.match(page, /Game tags<input/);
+  assert.match(page, /\(item\.tags \|\| \[\]\)\.join\(" "\)/);
+  assert.match(css, /\.game-tags\{/);
+  assert.match(migration, /add column if not exists tags text\[\] not null default/);
+  assert.match(migration, /tags = normalized_tags/);
+  assert.match(migration, /tags = second_game\.tags/);
+  assert.match(migration, /revoke all on function public\.update_game_details\(uuid, jsonb\) from public, anon/);
+  assert.equal(JSON.parse(packageJson).version, "0.43.0");
+});
