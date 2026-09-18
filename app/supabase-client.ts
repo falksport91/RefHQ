@@ -154,6 +154,7 @@ export type GameRecord = {
   gender: string | null;
   game_type: string | null;
   operational: boolean;
+  assigned_externally: boolean;
   tags: string[];
   schedule_changed_at?: string | null;
   schedule_changed_by?: string | null;
@@ -2469,7 +2470,7 @@ export async function createGame(
 export async function updateGameDetails(
   session: Law18Session,
   gameId: string,
-  values: Pick<GameRecord, "starts_at" | "field_name" | "venue_name" | "home_team" | "away_team" | "division" | "age_group" | "gender" | "game_type" | "operational" | "tags">,
+  values: Pick<GameRecord, "starts_at" | "field_name" | "venue_name" | "home_team" | "away_team" | "division" | "age_group" | "gender" | "game_type" | "operational" | "assigned_externally" | "tags">,
 ) {
   return rest<GameRecord>(session, "rpc/update_game_details", {
     method: "POST",
