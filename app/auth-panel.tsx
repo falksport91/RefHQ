@@ -60,7 +60,12 @@ export function AuthPanel({ onSession, recovery = false, initialMessage = "" }: 
   function signInWithGoogle() {
     setBusy(true);
     setMessage("");
-    auth.signInWithGoogle();
+    try {
+      auth.signInWithGoogle();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to start Google sign-in.");
+      setBusy(false);
+    }
   }
 
   async function sendRecovery() {

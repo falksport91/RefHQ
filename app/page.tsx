@@ -146,7 +146,7 @@ import type { ScheduleExportRow, SchedulePdfOptions } from "./schedule-export";
 import { normalizePhoneNumber, phoneCallHref } from "./phone";
 import { TurnstileChallenge, turnstileEnabled } from "./turnstile";
 
-const APP_VERSION = "0.44.1";
+const APP_VERSION = "0.44.2";
 const AUTOMATIC_RECOVERY_KEY = "law18ref-automatic-recovery";
 
 async function reloadFreshApplication(reason: string) {
