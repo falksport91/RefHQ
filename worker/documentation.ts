@@ -1,6 +1,7 @@
 import catalog from '../docs/documentation-catalog.json' with { type: 'json' };
+import { accountLifecycleDecision, type AccountLifecycleEnv } from './account-lifecycle.ts';
 
-type DocumentationEnv = {
+type DocumentationEnv = AccountLifecycleEnv & {
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
   ASSETS: { fetch(request: Request): Promise<Response> };
@@ -21,6 +22,10 @@ export async function documentationDownload(request: Request, env: Documentation
     const authHeaders = { apikey: env.SUPABASE_ANON_KEY, Authorization: authorization };
     const user = await fetcher(`${base}/auth/v1/user`, { headers: authHeaders });
     if (!user.ok) return fail('Please sign in again.', 401);
+    const authenticated = await user.json() as { id?: string };
+    if (!authenticated.id) return fail('Please sign in again.', 401);
+    const lifecycle = await accountLifecycleDecision(env, authenticated.id, fetcher);
+    if (!lifecycle.active) return fail('This account is not active.', 403);
     // Database-controlled owner status, never user-editable metadata or UI roles.
     const owner = await fetcher(`${base}/rest/v1/rpc/is_site_owner`, {
       method: 'POST', headers: { ...authHeaders, 'Content-Type': 'application/json' }, body: '{}',

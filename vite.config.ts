@@ -18,7 +18,12 @@ const localBindingConfig = {
   keep_vars: true,
   assets: {
     binding: "ASSETS",
-    run_worker_first: ["/api/owner-documents/*", "/version.json", "/sw.js"],
+    run_worker_first: [
+      "/api/account-lifecycle/*",
+      "/api/owner-documents/*",
+      "/version.json",
+      "/sw.js",
+    ],
   },
   compatibility_flags: ["nodejs_compat"],
   d1_databases: d1

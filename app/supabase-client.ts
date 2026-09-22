@@ -1,4 +1,4 @@
-import { auth, type Law18Session } from "./auth-client.ts";
+import { auth, SessionExpiredError, type Law18Session } from "./auth-client.ts";
 import { normalizePhoneNumber } from "./phone.ts";
 
 const baseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -463,6 +463,9 @@ async function rest<T>(
     activeSession = await auth.ensureValidSession(activeSession, true);
     response = await perform(activeSession.access_token);
   }
+  if (response.status === 401) {
+    throw new SessionExpiredError("Please sign in again.");
+  }
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;
   if (!response.ok) {
@@ -489,6 +492,27 @@ async function publicRest<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 
 const enc = encodeURIComponent;
+
+export class AccountLifecycleBlockedError extends Error {
+  constructor(message = "This account is not active.") {
+    super(message);
+    this.name = "AccountLifecycleBlockedError";
+  }
+}
+
+export async function ensureAccountLifecycleAccess(session: Law18Session) {
+  const activeSession = await auth.ensureValidSession(session);
+  const response = await fetch("/api/account-lifecycle/status", {
+    headers: { Authorization: `Bearer ${activeSession.access_token}`, Accept: "application/json" },
+    cache: "no-store",
+  });
+  const payload = await response.json().catch(() => ({})) as { active?: boolean; status?: string; message?: string };
+  if (response.status === 403 || payload.active === false) {
+    throw new AccountLifecycleBlockedError(payload.message || "This account is not active.");
+  }
+  if (!response.ok) throw new Error(payload.message || "Account verification is unavailable.");
+  return payload;
+}
 
 export async function loadProfile(session: Law18Session) {
   const rows = await rest<Profile[]>(session, `profiles?id=eq.${enc(session.user.id)}&select=*`);
@@ -830,6 +854,9 @@ async function calendarFeedRequest<T>(session: Law18Session, path = "", init: Re
   if (response.status === 401) {
     activeSession = await auth.ensureValidSession(activeSession, true);
     response = await perform(activeSession.access_token);
+  }
+  if (response.status === 401) {
+    throw new SessionExpiredError("Please sign in again.");
   }
   const text = await response.text();
   const payload = text ? JSON.parse(text) : null;

@@ -2,8 +2,14 @@
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
 import { documentationDownload } from "./documentation";
+import {
+  AccountLifecycleUnavailableError,
+  accountInventoryResponse,
+  accountLifecycleDecision,
+  type AccountLifecycleEnv,
+} from "./account-lifecycle";
 
-interface Env {
+interface Env extends AccountLifecycleEnv {
   ASSETS: Fetcher;
   DB: D1Database;
   SUPABASE_URL?: string;
@@ -102,8 +108,13 @@ function calendarConfiguration(env: Env) {
   };
 }
 
+function authConfiguration(env: Env) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY) throw new Error("Authentication is not configured on this deployment.");
+  return { url: env.SUPABASE_URL.replace(/\/$/, ""), anon: env.SUPABASE_ANON_KEY };
+}
+
 async function currentUser(request: Request, env: Env) {
-  const config = calendarConfiguration(env);
+  const config = authConfiguration(env);
   const authorization = request.headers.get("Authorization") || "";
   if (!authorization.startsWith("Bearer ")) return null;
   const response = await fetch(`${config.url}/auth/v1/user`, {
@@ -269,6 +280,19 @@ function parseCalendar(text: string): CalendarItem[] {
 
 async function syncFeed(feed: FeedRecord, env: Env) {
   const config = calendarConfiguration(env);
+  const lifecycle = await accountLifecycleDecision(env, feed.user_id);
+  if (!lifecycle.active) {
+    await serviceRest(env, `personal_calendar_feeds?id=eq.${encodeURIComponent(feed.id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        active: false,
+        sync_status: "paused",
+        last_error: "Synchronization paused because this account is not active.",
+        updated_at: new Date().toISOString(),
+      }),
+    }, "return=minimal");
+    return 0;
+  }
   await serviceRest(env, `personal_calendar_feeds?id=eq.${encodeURIComponent(feed.id)}`, {
     method: "PATCH", body: JSON.stringify({ sync_status: "syncing", last_error: null, updated_at: new Date().toISOString() }),
   }, "return=minimal");
@@ -304,6 +328,13 @@ async function calendarFeedApi(request: Request, env: Env, ctx: ExecutionContext
   let user: { id: string; email?: string } | null;
   try { user = await currentUser(request, env); } catch (reason) { return json({ message: reason instanceof Error ? reason.message : "Connected Schedules is unavailable." }, 503); }
   if (!user) return json({ message: "Your session has expired." }, 401);
+  try {
+    const lifecycle = await accountLifecycleDecision(env, user.id);
+    if (!lifecycle.active) return json({ message: "This account is not active." }, 403);
+  } catch (reason) {
+    if (reason instanceof AccountLifecycleUnavailableError) return json({ message: reason.message }, 503);
+    throw reason;
+  }
   const url = new URL(request.url);
   const suffix = url.pathname.slice("/api/calendar-feeds".length).replace(/^\//, "");
   const [feedId, action] = suffix.split("/");
@@ -365,6 +396,22 @@ async function calendarFeedApi(request: Request, env: Env, ctx: ExecutionContext
 const worker = {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
+
+    if (url.pathname === "/api/account-lifecycle/inventory") {
+      return secureResponse(await accountInventoryResponse(request, env), request);
+    }
+
+    if (url.pathname === "/api/account-lifecycle/status") {
+      let user: { id: string; email?: string } | null;
+      try { user = await currentUser(request, env); } catch { return secureResponse(json({ message: "Account verification is unavailable." }, 503), request); }
+      if (!user) return secureResponse(json({ message: "Please sign in again." }, 401), request);
+      try {
+        const lifecycle = await accountLifecycleDecision(env, user.id);
+        return secureResponse(json(lifecycle, lifecycle.active ? 200 : 403), request);
+      } catch (reason) {
+        return secureResponse(json({ message: reason instanceof Error ? reason.message : "Account verification is unavailable." }, 503), request);
+      }
+    }
 
     if (url.pathname.startsWith("/api/owner-documents/")) {
       return secureResponse(await documentationDownload(request, env), request);

@@ -9,7 +9,7 @@ test('documentation denies anonymous users without reading assets', async () => 
   assert.equal(response.status, 401);
 });
 test('documentation denies non-owners, invalid tokens, and unavailable permission checks', async () => {
-  for (const responses of [[new Response('', {status:401})], [new Response('{}'), new Response('false')], [new Response('{}'), new Response('', {status:500})]]) {
+  for (const responses of [[new Response('', {status:401})], [Response.json({id:'00000000-0000-4000-8000-000000000001'}), new Response('false')], [Response.json({id:'00000000-0000-4000-8000-000000000001'}), new Response('', {status:500})]]) {
     let assets = 0;
     const response = await documentationDownload(request(), {...env, ASSETS: {fetch: async () => { assets++; return new Response('bad'); }}}, async () => responses.shift());
     assert.ok([401,403].includes(response.status)); assert.equal(assets, 0);
@@ -18,7 +18,9 @@ test('documentation denies non-owners, invalid tokens, and unavailable permissio
 test('owner downloads use current database permission and are never cached', async () => {
   const calls = [];
   const response = await documentationDownload(request(), env, async (url, options) => {
-    calls.push([url,options]); return new Response(calls.length === 1 ? '{}' : 'true');
+    calls.push([url,options]); return calls.length === 1
+      ? Response.json({id:'00000000-0000-4000-8000-000000000001'})
+      : new Response('true');
   });
   assert.equal(response.status, 200);
   assert.equal(await response.text(), 'document bytes');

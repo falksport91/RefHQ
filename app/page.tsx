@@ -16,6 +16,8 @@ import {
   confirmExternalCheckIn,
   confirmGameScheduleChange,
   claimOrganizationJoinLink,
+  ensureAccountLifecycleAccess,
+  AccountLifecycleBlockedError,
   createCoachAssignment,
   createOfficialsExportCsv,
   createOrganizationJoinLink,
@@ -144,7 +146,7 @@ import type { ScheduleExportRow, SchedulePdfOptions } from "./schedule-export";
 import { normalizePhoneNumber, phoneCallHref } from "./phone";
 import { TurnstileChallenge, turnstileEnabled } from "./turnstile";
 
-const APP_VERSION = "0.44.0";
+const APP_VERSION = "0.44.1";
 const AUTOMATIC_RECOVERY_KEY = "law18ref-automatic-recovery";
 
 async function reloadFreshApplication(reason: string) {
@@ -4533,6 +4535,7 @@ function Dashboard({ session, onSessionExpired }: { session: Law18Session; onSes
     (async () => {
       setDashboardLoadError("");
       try {
+        await ensureAccountLifecycleAccess(session);
         const joinToken = new URLSearchParams(window.location.search).get("join") || localStorage.getItem("law18ref-join-token");
         if (joinToken) {
           try {
@@ -4613,6 +4616,7 @@ function Dashboard({ session, onSessionExpired }: { session: Law18Session; onSes
         sessionStorage.removeItem("law18ref-refresh-event");
       } catch (reason) {
         if (isSessionExpiredError(reason)) onSessionExpired();
+        else if (reason instanceof AccountLifecycleBlockedError) onSessionExpired();
         else setDashboardLoadError(reason instanceof Error ? reason.message : "Law18Ref could not load. Check your connection and try again.");
       } finally {
         setLoading(false);
@@ -4873,6 +4877,7 @@ export default function Home() {
   const handleSessionExpired = useCallback(() => {
     auth.signOut();
     setAuthMessage("");
+    sessionStorage.removeItem(AUTOMATIC_RECOVERY_KEY);
     setReloadRequired(true);
   }, []);
   useEffect(() => {
