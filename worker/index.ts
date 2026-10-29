@@ -4,6 +4,8 @@ import handler from "vinext/server/app-router-entry";
 import { documentationDownload } from "./documentation";
 import {
   AccountLifecycleUnavailableError,
+  accountAccessChangeResponse,
+  accountAccessPreviewResponse,
   accountInventoryResponse,
   accountLifecycleDecision,
   type AccountLifecycleEnv,
@@ -399,6 +401,14 @@ const worker = {
 
     if (url.pathname === "/api/account-lifecycle/inventory") {
       return secureResponse(await accountInventoryResponse(request, env), request);
+    }
+
+    if (url.pathname === "/api/account-lifecycle/preview") {
+      return secureResponse(await accountAccessPreviewResponse(request, env), request);
+    }
+
+    if (url.pathname === "/api/account-lifecycle/change") {
+      return secureResponse(await accountAccessChangeResponse(request, env), request);
     }
 
     if (url.pathname === "/api/account-lifecycle/status") {

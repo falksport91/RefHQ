@@ -161,7 +161,7 @@ The central response must contain:
 }
 ```
 
-Accepted states are `active`, `archived`, `deletion_pending`, `deleted`, and `revoked`. Any configured-but-unavailable or malformed response fails closed. When the integration is entirely unconfigured, the adapter reports enforcement as disabled and preserves existing Law18Ref behavior.
+Accepted states are `active`, `access_removed`, `banned`, `archived`, `deletion_pending`, `deleted`, and `revoked`. Only `active` permits ordinary application access. Any configured-but-unavailable or malformed response fails closed. When the integration is entirely unconfigured, the adapter reports enforcement as disabled and preserves existing Law18Ref behavior.
 
 The central account service can request a server-only export inventory at:
 
@@ -169,9 +169,33 @@ The central account service can request a server-only export inventory at:
 
 with `X-FS91-Adapter-Token`. The response includes official references, categorized record counts, an appearance-storage manifest, explicit secret exclusions, and a SHA-256 manifest digest. It does not return personal calendar feed URLs, ciphertext, credentials, or file contents.
 
+The same token protects the local access-mutation adapter:
+
+- `GET /api/account-lifecycle/preview?application_user_id={uuid}&action=remove|ban|unban`
+- `POST /api/account-lifecycle/change` with `{ application_user_id, action, reason, request_id }`
+
+`delete` and `delete_access` are accepted aliases for `remove`. The caller must supply a durable UUID `request_id`. Replaying the same request for the same user and action returns the recorded result; reusing it for a different operation fails. Preview blocks the Site Owner and any user who is the final active director/administrator of an active group.
+
+The local transaction snapshots active group grants, event scopes, provisional event access, and imported pending roles. It archives group memberships, removes live event/provisional scopes, pauses personal feeds, and marks linked officials so automatic email linkage cannot restore access. Assignments, ratings, check-ins, profiles, Auth identities, sessions, official records, audit attribution, and shared business data are retained. Ban performs the same access removal plus a persistent Law18Ref ban marker. Unban only clears that marker and restores zero grants.
+
+The migration adds a restrictive authenticated-user policy to every existing RLS-protected public table. This makes already-issued JWTs lose ordinary Data API access as soon as the local removal transaction commits. Anonymous External Check-In remains unaffected. A later explicit group-join link may clear the local removal marker for that group and creates only its fresh default Referee grant; automatic account linking ignores all removed official records.
+
 The browser checks `/api/account-lifecycle/status` before any join-link claim, automatic official linking, membership load, or event load. Calendar API calls, background synchronization, scheduled synchronization, and owner-document downloads use the same server-side lifecycle decision.
 
-Database root authorization remains a coordinated dependency. Direct PostgREST/RPC access cannot be considered fully revoked until the primary lifecycle migration adds the shared fail-closed predicate to Law18Ref root RLS and authorization helpers.
+The local restrictive RLS gate covers current RLS-protected public tables. Any future exposed table must either enable RLS before deployment and receive the restrictive gate, or be added explicitly in a follow-up migration. Any new authenticated `SECURITY DEFINER` RPC must also call the local access predicate or prove that its existing authorization helper does so.
+
+## Central coordination prerequisites and deployment blockers
+
+Do not enable or advertise these operations until all items below are complete:
+
+1. Central state must use `active`, `access_removed`, and `banned` consistently. Delete Access resolves to `access_removed`; Ban resolves to `banned`; Unban resolves to `access_removed` and never to `active`.
+2. The central owner-only wrapper must validate a current session and Site Owner authorization before calling the adapter. Law18Ref intentionally does not duplicate central owner authorization.
+3. Central change orchestration must call preview, write/coordinate central state, call the adapter with one durable request UUID, and record a verified adapter receipt. It must not report completion from a UI-only response.
+4. An explicit ordinary rejoin needs a coordinated central transition from `access_removed` to `active` before Law18Ref can process the join token. The Law18Ref join transaction then creates only a fresh Referee grant for the selected group.
+5. Configure all three Worker secrets together and route `/api/account-lifecycle/*` through the Worker. Partial lifecycle configuration fails closed.
+6. Apply `supabase/migrations/20260925153518_platform_access_lifecycle_adapter.sql` only after reviewing remote migration history. The current linked project reports many remote migration versions absent from this checkout, so normal `supabase db push --dry-run` is blocked. Do not repair history or push this migration until those remote migrations are reconciled with the canonical repository.
+7. No real account may be used for acceptance testing. Use isolated fixtures that include a normal user, last group leader, Site Owner, already-removed user, and banned user. Verify both browser bootstrap and direct PostgREST calls with pre-existing JWTs.
+8. The current central change wrapper is a local SQL transaction only. A remote Law18Ref mutation cannot participate atomically in that transaction; central must first implement a durable saga/outbox with signed adapter requests, retries using the same request UUID, verified receipts, and explicit incomplete/compensation states. Until that exists, the Law18Ref adapter routes and controls remain disabled and undeployed.
 
 ### Proposed coordinated database helper
 

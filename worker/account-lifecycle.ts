@@ -1,4 +1,13 @@
-export type AccountLifecycleStatus = "active" | "archived" | "deletion_pending" | "deleted" | "revoked";
+export type AccountLifecycleStatus =
+  | "active"
+  | "access_removed"
+  | "banned"
+  | "archived"
+  | "deletion_pending"
+  | "deleted"
+  | "revoked";
+
+export type PlatformAccessAction = "remove" | "ban" | "unban";
 
 export type AccountLifecycleEnv = {
   SUPABASE_URL?: string;
@@ -24,7 +33,7 @@ export class AccountLifecycleUnavailableError extends Error {
 }
 
 const allowedStatuses = new Set<AccountLifecycleStatus>([
-  "active", "archived", "deletion_pending", "deleted", "revoked",
+  "active", "access_removed", "banned", "archived", "deletion_pending", "deleted", "revoked",
 ]);
 
 function lifecycleConfiguration(env: AccountLifecycleEnv) {
@@ -214,11 +223,86 @@ function timingSafeEqual(left: string, right: string) {
   return difference === 0;
 }
 
-export async function accountInventoryResponse(request: Request, env: AccountLifecycleEnv) {
-  if (request.method !== "GET") return new Response("Method not allowed.", { status: 405 });
+function normalizedAccessAction(value: unknown): PlatformAccessAction | null {
+  const action = String(value || "").trim().toLowerCase();
+  if (action === "delete" || action === "delete_access") return "remove";
+  return action === "remove" || action === "ban" || action === "unban" ? action : null;
+}
+
+function validUuid(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
+}
+
+function adapterAuthorized(request: Request, env: AccountLifecycleEnv) {
   const configuredToken = env.FS91_ACCOUNT_LIFECYCLE_ADAPTER_TOKEN?.trim();
   const suppliedToken = request.headers.get("X-FS91-Adapter-Token") || "";
-  if (!configuredToken || !timingSafeEqual(configuredToken, suppliedToken)) {
+  return Boolean(configuredToken && timingSafeEqual(configuredToken, suppliedToken));
+}
+
+async function lifecycleRpc(env: AccountLifecycleEnv, name: string, body: Record<string, unknown>) {
+  const response = await serviceRequest(env, `rpc/${name}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return response.json() as Promise<Record<string, unknown>>;
+}
+
+export async function accountAccessPreviewResponse(request: Request, env: AccountLifecycleEnv) {
+  if (request.method !== "GET") return new Response("Method not allowed.", { status: 405 });
+  if (!adapterAuthorized(request, env)) return new Response("Lifecycle adapter authorization required.", { status: 403 });
+  const url = new URL(request.url);
+  const userId = url.searchParams.get("application_user_id")?.trim();
+  const action = normalizedAccessAction(url.searchParams.get("action"));
+  if (!validUuid(userId) || !action) return new Response("A valid application_user_id and action are required.", { status: 400 });
+  try {
+    return Response.json(await lifecycleRpc(env, "law18ref_platform_access_preview", {
+      target_user: userId,
+      requested_action: action,
+    }), { headers: { "Cache-Control": "private, no-store" } });
+  } catch (reason) {
+    return Response.json({ message: reason instanceof Error ? reason.message : "Unable to preview platform access." }, {
+      status: 503,
+      headers: { "Cache-Control": "private, no-store" },
+    });
+  }
+}
+
+export async function accountAccessChangeResponse(request: Request, env: AccountLifecycleEnv) {
+  if (request.method !== "POST") return new Response("Method not allowed.", { status: 405 });
+  if (!adapterAuthorized(request, env)) return new Response("Lifecycle adapter authorization required.", { status: 403 });
+  const body = await request.json().catch(() => null) as null | {
+    application_user_id?: unknown;
+    action?: unknown;
+    reason?: unknown;
+    request_id?: unknown;
+  };
+  const userId = body?.application_user_id;
+  const action = normalizedAccessAction(body?.action);
+  const requestId = body?.request_id;
+  const reason = typeof body?.reason === "string" ? body.reason.trim().slice(0, 500) : "";
+  if (!validUuid(userId) || !validUuid(requestId) || !action) {
+    return new Response("A valid application_user_id, request_id, and action are required.", { status: 400 });
+  }
+  try {
+    return Response.json(await lifecycleRpc(env, "law18ref_platform_access_change", {
+      target_user: userId,
+      requested_action: action,
+      change_reason: reason || null,
+      operation_request_id: requestId,
+    }), { headers: { "Cache-Control": "private, no-store" } });
+  } catch (reasonCaught) {
+    const message = reasonCaught instanceof Error ? reasonCaught.message : "Unable to change platform access.";
+    return Response.json({ message }, {
+      status: /blocked|already used/i.test(message) ? 409 : 503,
+      headers: { "Cache-Control": "private, no-store" },
+    });
+  }
+}
+
+export async function accountInventoryResponse(request: Request, env: AccountLifecycleEnv) {
+  if (request.method !== "GET") return new Response("Method not allowed.", { status: 405 });
+  if (!adapterAuthorized(request, env)) {
     return new Response("Lifecycle adapter authorization required.", { status: 403 });
   }
   const userId = new URL(request.url).searchParams.get("application_user_id")?.trim();

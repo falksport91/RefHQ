@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import {
   AccountLifecycleUnavailableError,
+  accountAccessChangeResponse,
+  accountAccessPreviewResponse,
   accountInventoryResponse,
   accountLifecycleDecision,
   buildAccountExportInventory,
@@ -32,6 +34,10 @@ test("configured lifecycle resolution allows only active accounts", async () => 
   const archived = await accountLifecycleDecision(env, "00000000-0000-4000-8000-000000000001", async () => Response.json({ status: "archived" }));
   assert.equal(archived.active, false);
   assert.equal(archived.status, "archived");
+  const accessRemoved = await accountLifecycleDecision(env, "00000000-0000-4000-8000-000000000001", async () => Response.json({ status: "access_removed" }));
+  assert.equal(accessRemoved.active, false);
+  const banned = await accountLifecycleDecision(env, "00000000-0000-4000-8000-000000000001", async () => Response.json({ status: "banned" }));
+  assert.equal(banned.active, false);
 });
 
 test("partial, failed, and malformed lifecycle configuration fails closed", async () => {
@@ -71,6 +77,74 @@ test("verified inventory contains counts and references but no feed URLs or cred
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("platform-access preview and change endpoints are token-protected and validate actions", async () => {
+  const env = {
+    SUPABASE_URL: "https://example.supabase.co",
+    SUPABASE_SERVICE_ROLE_KEY: "service-secret",
+    FS91_ACCOUNT_LIFECYCLE_ADAPTER_TOKEN: "adapter-secret",
+  };
+  const previewUrl = "https://law18ref.com/api/account-lifecycle/preview?application_user_id=00000000-0000-4000-8000-000000000001&action=delete_access";
+  assert.equal((await accountAccessPreviewResponse(new Request(previewUrl), env)).status, 403);
+  const invalid = new Request(previewUrl.replace("delete_access", "restore"), { headers: { "X-FS91-Adapter-Token": "adapter-secret" } });
+  assert.equal((await accountAccessPreviewResponse(invalid, env)).status, 400);
+
+  const originalFetch = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init) => {
+    calls.push([String(url), JSON.parse(init.body)]);
+    return Response.json({ application: "law18ref", can_apply: true, action: calls.length === 1 ? "remove" : "ban" });
+  };
+  try {
+    const preview = new Request(previewUrl, { headers: { "X-FS91-Adapter-Token": "adapter-secret" } });
+    assert.equal((await accountAccessPreviewResponse(preview, env)).status, 200);
+    assert.match(calls[0][0], /rpc\/law18ref_platform_access_preview$/);
+    assert.equal(calls[0][1].requested_action, "remove");
+
+    const change = new Request("https://law18ref.com/api/account-lifecycle/change", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-FS91-Adapter-Token": "adapter-secret" },
+      body: JSON.stringify({
+        application_user_id: "00000000-0000-4000-8000-000000000001",
+        action: "ban",
+        reason: "owner-requested test",
+        request_id: "00000000-0000-4000-8000-000000000099",
+      }),
+    });
+    assert.equal((await accountAccessChangeResponse(change, env)).status, 200);
+    assert.match(calls[1][0], /rpc\/law18ref_platform_access_change$/);
+    assert.equal(calls[1][1].operation_request_id, "00000000-0000-4000-8000-000000000099");
+    assert.equal(calls[1][1].requested_action, "ban");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("local platform-access migration archives grants, blocks ownership removal, and never restores old grants", async () => {
+  const migration = await read("supabase/migrations/20260925153518_platform_access_lifecycle_adapter.sql");
+  assert.match(migration, /platform_access_action_requests/);
+  assert.match(migration, /primary key \(request_id, source_table, grant_id\)/);
+  assert.match(migration, /site_owner_protected/);
+  assert.match(migration, /last_group_leader/);
+  assert.match(migration, /set status = 'archived'/);
+  assert.match(migration, /delete from public\.event_memberships where user_id = target_user/);
+  assert.match(migration, /delete from public\.provisional_event_access/);
+  assert.match(migration, /platform_access_banned_at = null/);
+  assert.match(migration, /'restored_grants', 0/);
+  assert.match(migration, /official\.platform_access_removed_at is null/);
+  assert.match(migration, /when access_was_removed then array\[target_link\.default_role\]/);
+  assert.doesNotMatch(migration, /delete from auth\.users/);
+  assert.doesNotMatch(migration, /delete from public\.profiles/);
+});
+
+test("existing authenticated tokens are restricted after local access removal", async () => {
+  const migration = await read("supabase/migrations/20260925153518_platform_access_lifecycle_adapter.sql");
+  assert.match(migration, /law18ref_current_user_access_allowed/);
+  assert.match(migration, /as restrictive for all to authenticated/);
+  assert.match(migration, /platform_access_removed_at is null/);
+  assert.match(migration, /platform_access_banned_at is null/);
+  assert.match(migration, /Anonymous external check-in remains unaffected/);
 });
 
 test("bootstrap, calendar API, cron and documentation use lifecycle gates", async () => {
