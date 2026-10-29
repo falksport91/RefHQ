@@ -1,7 +1,11 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
-    const assetPath = url.pathname === "/law18ref-logo.png" || url.pathname === "/fs91-logo.svg"
+    const assetPath = [
+      "/law18ref-logo.png",
+      "/fs91-icon.png",
+      "/falksport91-wordmark.png"
+    ].includes(url.pathname)
       ? url.pathname
       : "/index.html";
     const response = await env.ASSETS.fetch(new Request(new URL(assetPath, url), request));
